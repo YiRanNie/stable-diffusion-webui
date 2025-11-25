@@ -30,6 +30,8 @@ from modules import prompt_parser
 from modules.sd_hijack import model_hijack
 from modules.infotext_utils import image_from_url_text, PasteField
 
+import modules.ui_prompt_optimizer as ui_prompt_optimizer
+
 create_setting_component = ui_settings.create_setting_component
 
 warnings.filterwarnings("default" if opts.show_warnings else "ignore", category=UserWarning)
@@ -868,6 +870,9 @@ def create_ui():
 
     scripts.scripts_current = None
 
+    with gr.Blocks(analytics_enabled=False) as prompt_optimizer_interface:
+        ui_prompt_optimizer.create_ui()
+
     with gr.Blocks(analytics_enabled=False) as extras_interface:
         ui_postprocessing.create_ui()
 
@@ -1113,6 +1118,7 @@ def create_ui():
     settings.create_ui(loadsave, dummy_component)
 
     interfaces = [
+        (prompt_optimizer_interface, "Prompt Optimizer", "prompt_optimizer"),
         (txt2img_interface, "txt2img", "txt2img"),
         (img2img_interface, "img2img", "img2img"),
         (extras_interface, "Extras", "extras"),
