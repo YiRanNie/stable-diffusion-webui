@@ -3,6 +3,7 @@ import re
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+
 MODEL_ID = "Qwen/Qwen1.5-0.5B-Chat"
 
 print(f">>> [PromptOptimizer] Loading local LLM model: {MODEL_ID} (first run may take a while)...")
@@ -25,6 +26,7 @@ model.to(DEVICE)
 model.eval()
 
 print(f">>> [PromptOptimizer] Model loaded on {DEVICE}: {MODEL_ID}")
+
 
 SYSTEM_PROMPT = """
 You rewrite short English prompts for image generation.
@@ -218,3 +220,40 @@ def generate_negative_prompt(user_prompt: str) -> str:
         return DEFAULT_NEGATIVE
 
     return text
+
+
+STYLE_PRESETS = {
+    "None": "",
+    "Photorealistic": (
+        "photorealistic, 8k uhd, ultra detailed, realistic lighting, natural skin texture"
+    ),
+    "Anime": (
+        "anime style, clean lineart, vibrant colors, flat shading, 2d illustration"
+    ),
+    "Illustration": (
+        "digital illustration, painterly, detailed brushwork, soft shading, concept art"
+    ),
+    "Cinematic": (
+        "cinematic lighting, film still, dramatic contrast, wide shot, anamorphic lens bokeh"
+    ),
+    "3D Render": (
+        "3d render, octane render, highly detailed, global illumination, physically based rendering"
+    ),
+}
+
+
+def apply_style_to_prompt(prompt: str, style_name: str) -> str:
+    if not prompt:
+        return prompt
+    style_key = style_name or "None"
+    style_text = STYLE_PRESETS.get(style_key, "").strip()
+    if not style_text:
+        return prompt
+    if style_text.lower() in prompt.lower():
+        return prompt
+    return prompt + ", " + style_text
+
+
+def optimize_prompt_with_style(user_prompt: str, style_name: str) -> str:
+    base = optimize_prompt_llm(user_prompt)
+    return apply_style_to_prompt(base, style_name)

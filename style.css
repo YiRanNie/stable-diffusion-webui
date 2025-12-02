@@ -1661,7 +1661,8 @@ body.resizing .resize-handle {
     width: 0;
 }
 
-.extra-network-tree .tree-list-content:hover .button-row {
-    visibility: visible;
-    width: auto;
+.ai-prompt-button {
+    border-radius: 8px !important;
+    font-weight: 600;
 }
+
