@@ -32,6 +32,7 @@ from modules.infotext_utils import image_from_url_text, PasteField
 
 import modules.ui_prompt_optimizer as ui_prompt_optimizer
 from modules import prompt_optimizer_llm
+import modules.ui_anime_video as ui_anime_video
 
 create_setting_component = ui_settings.create_setting_component
 
@@ -969,6 +970,9 @@ def create_ui():
 
     scripts.scripts_current = None
 
+    with gr.Blocks(analytics_enabled=False) as anime_video_interface:
+        ui_anime_video.create_ui()
+
     with gr.Blocks(analytics_enabled=False) as prompt_optimizer_interface:
         ui_prompt_optimizer.create_ui()
 
@@ -1217,9 +1221,10 @@ def create_ui():
     settings.create_ui(loadsave, dummy_component)
 
     interfaces = [
-        (prompt_optimizer_interface, "Prompt Optimizer", "prompt_optimizer"),
+        (prompt_optimizer_interface, "prompt optimizer", "prompt_optimizer"),
         (txt2img_interface, "txt2img", "txt2img"),
         (img2img_interface, "img2img", "img2img"),
+        (anime_video_interface, "video2anime", "anime_video"),
         (extras_interface, "Extras", "extras"),
         (pnginfo_interface, "PNG Info", "pnginfo"),
         (modelmerger_ui.blocks, "Checkpoint Merger", "modelmerger"),
