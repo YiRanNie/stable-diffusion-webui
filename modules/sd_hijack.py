@@ -358,6 +358,7 @@ class EmbeddingsWithFixes(torch.nn.Module):
             for offset, embedding in fixes:
                 vec = embedding.vec[self.textual_inversion_key] if isinstance(embedding.vec, dict) else embedding.vec
                 emb = devices.cond_cast_unet(vec)
+                emb = emb.to(device=tensor.device)  
                 emb_len = min(tensor.shape[0] - offset - 1, emb.shape[0])
                 tensor = torch.cat([tensor[0:offset + 1], emb[0:emb_len], tensor[offset + 1 + emb_len:]]).to(dtype=inputs_embeds.dtype)
 

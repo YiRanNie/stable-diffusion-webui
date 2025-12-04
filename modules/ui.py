@@ -33,6 +33,7 @@ from modules.infotext_utils import image_from_url_text, PasteField
 import modules.ui_prompt_optimizer as ui_prompt_optimizer
 from modules import prompt_optimizer_llm
 import modules.ui_anime_video as ui_anime_video
+import modules.ui_image_retrieval as ui_image_retrieval
 
 create_setting_component = ui_settings.create_setting_component
 
@@ -973,6 +974,9 @@ def create_ui():
     with gr.Blocks(analytics_enabled=False) as anime_video_interface:
         ui_anime_video.create_ui()
 
+    with gr.Blocks(analytics_enabled=False) as image_retrieval_interface:
+        ui_image_retrieval.create_ui()
+
     with gr.Blocks(analytics_enabled=False) as prompt_optimizer_interface:
         ui_prompt_optimizer.create_ui()
 
@@ -1225,6 +1229,7 @@ def create_ui():
         (txt2img_interface, "txt2img", "txt2img"),
         (img2img_interface, "img2img", "img2img"),
         (anime_video_interface, "video2anime", "anime_video"),
+        (image_retrieval_interface, "Image Search", "image_retrieval"),
         (extras_interface, "Extras", "extras"),
         (pnginfo_interface, "PNG Info", "pnginfo"),
         (modelmerger_ui.blocks, "Checkpoint Merger", "modelmerger"),
