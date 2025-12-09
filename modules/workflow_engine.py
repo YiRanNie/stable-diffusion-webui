@@ -7,6 +7,12 @@ from modules import processing
 import modules.shared as shared
 from modules.shared import opts
 
+import base64
+import io
+from PIL import Image
+from modules import images
+
+
 try:
     from modules import prompt_optimizer_llm
 except Exception:
@@ -166,11 +172,34 @@ def topological_sort(graph: WorkflowGraph) -> List[str]:
 NODE_HANDLERS: Dict[str, Any] = {}
 
 
-@register_node_handler("workflow/input")
-def handle_input(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowContext) -> Dict[str, Any]:
+@register_node_handler("workflow/text_input")
+def handle_text_input(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowContext) -> Dict[str, Any]:
+    """
+    纯文本输入节点：原来的 workflow/input，现在改名为 workflow/text_input。
+    """
     prompt = node.config.get("prompt", "")
     negative = node.config.get("negative_prompt", "")
     return {"data": {"prompt": prompt, "negative": negative, "text": prompt}}
+
+
+# 兼容老的 workflow/input 类型（老工程里保存的图还能跑）
+NODE_HANDLERS["workflow/input"] = handle_text_input
+
+
+@register_node_handler("workflow/image_input")
+def handle_image_input(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowContext) -> Dict[str, Any]:
+    """
+    图片输入节点：workflow/image_input
+    目前的设计：
+    - 前端会把选中的图片信息（例如文件路径 / base64 / URL）写进 node.config["image"]
+    - 这里简单地把它透传到 data.image，后续 img2img 节点可以从 payload["image"] 里拿到。
+    后面如果接 Gradio Image 组件并传 PIL.Image 进来，也可以在这里做类型转换。
+    """
+    image_val = node.config.get("image")  # 目前只是预留字段，前端接好后才能真正生效
+    data = {}
+    if image_val is not None:
+        data["image"] = image_val
+    return {"data": data}
 
 
 @register_node_handler("workflow/prompt_optimizer")
@@ -238,6 +267,14 @@ def _safe_int(val: Any, default: int) -> int:
     except Exception:
         return default
 
+def _safe_float(val: Any, default: float) -> float:
+    try:
+        if val is None:
+            return default
+        return float(val)
+    except Exception:
+        return default
+
 
 def _create_txt2img_processing_for_workflow(
     prompt: str,
@@ -298,12 +335,62 @@ def _run_txt2img_processing(p):
     shared.total_tqdm.clear()
     return processed
 
+def _load_image_from_payload(payload: Dict[str, Any]):
+    """
+    从 image_data payload 中解析出一张 PIL.Image：
+    - 支持 image_input 节点传进来的 dataURL/base64（payload["image"]）
+    - 支持 txt2img 节点传进来的本地文件路径（payload["images"] 或 payload["preview_image"]）
+    """
+    if not isinstance(payload, dict):
+        return None
+
+    # 1) image_input: dataURL / base64
+    img_val = payload.get("image")
+    if isinstance(img_val, str):
+        if img_val.startswith("data:"):
+            try:
+                header, b64data = img_val.split(",", 1)
+                raw = base64.b64decode(b64data)
+                img = Image.open(io.BytesIO(raw))
+                return images.fix_image(img)
+            except Exception as exc:
+                _debug(f"[Img2Img] decode dataURL failed: {exc}")
+        else:
+            # 当作路径试试
+            try:
+                return images.fix_image(images.read(img_val))
+            except Exception as exc:
+                _debug(f"[Img2Img] read image path failed: {exc}")
+
+    # 2) 来自 txt2img: images 列表
+    paths = payload.get("images")
+    if isinstance(paths, list) and paths:
+        path = paths[0]
+        try:
+            return images.fix_image(images.read(path))
+        except Exception as exc:
+            _debug(f"[Img2Img] read images[0] failed: {exc}")
+
+    # 3) 来自 txt2img: preview_image 里带 file= 前缀
+    prev = payload.get("preview_image")
+    if isinstance(prev, str) and prev:
+        path = prev
+        if path.startswith("file="):
+            path = path[len("file=") :]
+        elif path.startswith("/file="):
+            path = path[len("/file=") :]
+        try:
+            return images.fix_image(images.read(path))
+        except Exception as exc:
+            _debug(f"[Img2Img] read preview_image failed: {exc}")
+
+    return None
 
 @register_node_handler("workflow/txt2img")
 def handle_txt2img(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowContext) -> Dict[str, Any]:
     """
     文生图节点：
-    - 输入：从上游拿 prompt / negative（可以来自 Input 或 Prompt Optimizer）
+    - 输入：从上游拿 prompt / negative（可以来自 Text Input 或 Prompt Optimizer）
     - 节点属性：width / height / steps
     - 输出：images（路径列表，给后续节点用）、preview_image（字符串 URL，给前端 Output 预览用）、text/info
     """
@@ -362,6 +449,137 @@ def handle_txt2img(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowCont
         }
     }
 
+@register_node_handler("workflow/img2img")
+def handle_img2img(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowContext) -> Dict[str, Any]:
+    """
+    图生图节点：
+    - 输入端口：
+        text_data: 上游的文本信息（Text Input / Prompt Optimizer / 其他文本节点）
+        image_data: 上游的图像信息（Image Input / Txt2Img / 其他图像节点）
+    - 节点属性：width / height / steps（与 txt2img 节点类似）
+    - 输出：与 txt2img 一致，包含 images / preview_image / prompt / negative / text
+    """
+
+    # 1) 分别取两个输入端口（注意：这里不走 _merge_input_payload）
+    text_payload = inputs.get("text_data") or {}
+    image_payload = inputs.get("image_data") or {}
+
+    if not isinstance(text_payload, dict) or not isinstance(image_payload, dict):
+        return {"data": {"error": "img2img requires both text_data and image_data inputs"}}
+
+    prompt = text_payload.get("prompt") or node.config.get("prompt", "") or ""
+    negative = text_payload.get("negative") or node.config.get("negative_prompt", "") or ""
+
+    # 2) 从 image_data 里解析一张 PIL.Image
+    init_image = _load_image_from_payload(image_payload)
+    if init_image is None:
+        return {"data": {"error": "img2img failed: no valid input image"}}
+
+    # 3) width / height / steps：优先节点属性，其次上游 payload，最后回退到图片尺寸 / 默认值
+    def pick_int(name: str, default: int) -> int:
+        if name in node.config:
+            return _safe_int(node.config.get(name), default)
+        if name in text_payload:
+            return _safe_int(text_payload.get(name), default)
+        if name in image_payload:
+            return _safe_int(image_payload.get(name), default)
+        return default
+
+    # 如果节点没填分辨率，就用原图尺寸作为默认
+    width_default = getattr(init_image, "width", 512) or 512
+    height_default = getattr(init_image, "height", 512) or 512
+
+    width = pick_int("width", width_default)
+    height = pick_int("height", height_default)
+    steps = pick_int("steps", 20)
+
+    # 基本合法化 & 对齐
+    width = max(64, width)
+    height = max(64, height)
+    steps = max(1, steps)
+    width = width - (width % 8)
+    height = height - (height % 8)
+
+    cfg_scale = getattr(opts, "cfg_scale", 7.0)
+
+    # 优先使用节点上的 denoising_strength，其次上游 payload，最后用全局默认
+    raw_denoise = None
+    if "denoising_strength" in node.config:
+        raw_denoise = node.config.get("denoising_strength")
+    elif "denoising_strength" in text_payload:
+        raw_denoise = text_payload.get("denoising_strength")
+    elif "denoising_strength" in image_payload:
+        raw_denoise = image_payload.get("denoising_strength")
+
+    default_denoise = getattr(opts, "img2img_denoising_strength", 0.6)
+    denoising = _safe_float(raw_denoise, default_denoise)
+
+    if denoising < 0.0:
+        denoising = 0.0
+    if denoising > 1.0:
+        denoising = 1.0
+
+    _debug(
+        f"[Img2Img] node_id={node.id} "
+        f"prompt={prompt!r} negative={negative!r} width={width} height={height} "
+        f"steps={steps} denoising={denoising} cfg={cfg_scale}"
+    )
+
+    # 4) 构造极简版 StableDiffusionProcessingImg2Img
+    try:
+        p = processing.StableDiffusionProcessingImg2Img(
+            sd_model=shared.sd_model,
+            outpath_samples=opts.outdir_samples or opts.outdir_img2img_samples,
+            outpath_grids=opts.outdir_grids or opts.outdir_img2img_grids,
+            prompt=prompt,
+            negative_prompt=negative,
+            styles=[],
+            batch_size=1,
+            n_iter=1,
+            cfg_scale=cfg_scale,
+            width=width,
+            height=height,
+            init_images=[init_image],
+            denoising_strength=denoising,
+        )
+
+        p.steps = steps
+        p.user = "workflow"
+
+        # 这里直接重用 process_images 包装（与 txt2img 一致）
+        processed = _run_txt2img_processing(p)
+
+    except Exception as exc:
+        _debug(f"[Img2Img] node_id={node.id} failed with error: {exc}")
+        return {"data": {"error": f"img2img failed: {exc}"}}
+
+    images_list = getattr(processed, "images", None) or []
+    _debug(f"[Img2Img] node_id={node.id} generated {len(images_list)} image(s)")
+
+    preview_url = ""
+    images_info: List[str] = []
+
+    if images_list:
+        first = images_list[0]
+        path = getattr(first, "already_saved_as", None)
+        if isinstance(path, str) and path:
+            if path.startswith("file=") or path.startswith("/file="):
+                preview_url = path
+            else:
+                preview_url = f"file={path}"
+            images_info.append(path)
+
+    info_text = getattr(processed, "info", "") or prompt
+
+    return {
+        "data": {
+            "prompt": prompt,
+            "negative": negative,
+            "text": info_text,
+            "images": images_info,
+            "preview_image": preview_url,
+        }
+    }
 
 @register_node_handler("workflow/output")
 def handle_output(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowContext) -> Dict[str, Any]:
@@ -404,8 +622,11 @@ def handle_output(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowConte
         }
     }
 
+
+# Text / Image Output 两个变种都用同一个 handler
 NODE_HANDLERS["workflow/output_text"] = handle_output
 NODE_HANDLERS["workflow/output_image"] = handle_output
+
 
 def execute_workflow(graph: WorkflowGraph) -> WorkflowContext:
     ctx = WorkflowContext(graph)

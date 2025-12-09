@@ -1,4 +1,4 @@
-// Workflow UI with Input / Prompt Optimizer / Txt2Img / Text Output / Image Output
+// Workflow UI with Text Input / Image Input / Prompt Optimizer / Txt2Img / Text Output / Image Output
 
 function workflowGetApp() {
     if (window.gradioApp) return window.gradioApp();
@@ -108,8 +108,9 @@ function workflowBindNodeOutputsListener(allowRetry = true) {
 // === 节点 schema 定义 ===
 
 const WORKFLOW_NODE_SCHEMAS = {
+    // 文本输入：类型仍然是 workflow/input，只是标题显示成 Text Input
     "workflow/input": {
-        title: "Input",
+        title: "Text Input",
         inputs: [],
         outputs: ["data"],
         defaults: {
@@ -120,6 +121,16 @@ const WORKFLOW_NODE_SCHEMAS = {
             { key: "prompt", label: "Prompt", type: "textarea", placeholder: "Enter prompt", rows: 8 },
             { key: "negative_prompt", label: "Negative Prompt", type: "textarea", placeholder: "Enter negative prompt", rows: 8 },
         ],
+    },
+    // 新增：图片输入
+    "workflow/image_input": {
+        title: "Image Input",
+        inputs: [],
+        outputs: ["data"],
+        defaults: {
+            image: "",
+        },
+        fields: [], // inspector 用自定义渲染，不用通用 fields
     },
     "workflow/prompt_optimizer": {
         title: "Prompt Optimizer",
@@ -141,6 +152,24 @@ const WORKFLOW_NODE_SCHEMAS = {
             { key: "width", label: "Width", type: "number", min: 64, step: 8 },
             { key: "height", label: "Height", type: "number", min: 64, step: 8 },
             { key: "steps", label: "Sampling Steps", type: "number", min: 1, step: 1 },
+        ],
+    },
+    "workflow/img2img": {
+        title: "Img2Img",
+        // 两个输入端口：一个文本，一个图像
+        inputs: ["text_data", "image_data"],
+        outputs: ["data"],
+        defaults: {
+            width: 512,
+            height: 512,
+            steps: 20,
+            denoising_strength: 0.75,
+        },
+        fields: [
+            { key: "width", label: "Width", type: "number", min: 64, step: 8 },
+            { key: "height", label: "Height", type: "number", min: 64, step: 8 },
+            { key: "steps", label: "Sampling Steps", type: "number", min: 1, step: 1 },
+            { key: "denoising_strength", label: "Denoising Strength", type: "number", min: 0, max: 1, step: 0.01 },
         ],
     },
     "workflow/output_text": {
@@ -177,10 +206,19 @@ function workflowStartTimer() {
     const box = window._workflowTimerBox;
     if (!box) return;
 
-    workflowLastNodeOutputsRaw = null;
-    window.workflowNodeOutputs = {};
+    // 以当前隐藏 textbox 的内容作为本轮运行的“基线”
+    const outBox = workflowFindComponent("workflow_node_outputs_json", "textarea");
+    if (outBox) {
+        const raw = outBox.value || "{}";
+        workflowLastNodeOutputsRaw = raw;
+    } else {
+        workflowLastNodeOutputsRaw = null;
+    }
 
-    workflowStopTimer(false);
+    // 不清空 window.workflowNodeOutputs，这样上一轮的结果仍然可见
+
+    // 重新启动计时器
+    workflowStopTimer(false); // 关掉上一次 interval，但不写终止时间
     workflowTimerStart = performance.now();
     box.textContent = "0.0s";
     box.classList.add("workflow-timer-running");
@@ -359,6 +397,17 @@ function workflowInjectStyle() {
         color: #e5e7eb;
         cursor: pointer;
     }
+    #workflow_canvas_root .workflow-select-image-button {
+        margin-top: 4px;
+        align-self: flex-start;
+        padding: 4px 10px;
+        font-size: 11px;
+        border-radius: 999px;
+        border: 1px solid #4b5563;
+        background: #111827;
+        color: #e5e7eb;
+        cursor: pointer;
+    }
 
     /* 全屏预览遮罩 */
     .workflow-img-overlay {
@@ -375,7 +424,7 @@ function workflowInjectStyle() {
         max-height: 95vh;
         border-radius: 12px;
         box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
-
+    }
     `;
     document.head.appendChild(style);
 }
@@ -395,9 +444,11 @@ function workflowInitLiteGraph() {
 
     const palette = document.createElement("div");
     palette.className = "workflow-palette";
-    palette.appendChild(workflowCreatePaletteNode("workflow/input"));
+    palette.appendChild(workflowCreatePaletteNode("workflow/input"));       // Text Input
+    palette.appendChild(workflowCreatePaletteNode("workflow/image_input")); // Image Input
     palette.appendChild(workflowCreatePaletteNode("workflow/prompt_optimizer"));
     palette.appendChild(workflowCreatePaletteNode("workflow/txt2img"));
+    palette.appendChild(workflowCreatePaletteNode("workflow/img2img"));
     palette.appendChild(workflowCreatePaletteNode("workflow/output_text"));
     palette.appendChild(workflowCreatePaletteNode("workflow/output_image"));
 
@@ -519,11 +570,66 @@ function workflowInitLiteGraph() {
 
         applyNodeDefaults(node);
         const meta = WORKFLOW_NODE_SCHEMAS[node.type];
-        if (meta && Array.isArray(meta.fields)) {
+
+        // 通用字段（Text Input / Txt2Img 等）
+        if (meta && Array.isArray(meta.fields) && node.type !== "workflow/image_input") {
             meta.fields.forEach((field) => {
                 const el = renderField(node, field);
                 if (el) inspectorMain.appendChild(el);
             });
+        }
+
+        // Image Input：自定义 inspector（选择图片 + 预览）
+        if (node.type === "workflow/image_input") {
+            const props = node.properties || {};
+
+            const wrap = document.createElement("div");
+            wrap.className = "workflow-inspector-field";
+
+            const label = document.createElement("label");
+            label.textContent = "Image";
+            wrap.appendChild(label);
+
+            if (props.image) {
+                const img = document.createElement("img");
+                img.className = "workflow-image-preview";
+                img.src = props.image;
+                wrap.appendChild(img);
+            } else {
+                const span = document.createElement("span");
+                span.style.fontSize = "11px";
+                span.style.color = "#6b7280";
+                span.textContent = "No image selected.";
+                wrap.appendChild(span);
+            }
+
+            const fileInput = document.createElement("input");
+            fileInput.type = "file";
+            fileInput.accept = "image/*";
+            fileInput.style.display = "none";
+
+            fileInput.addEventListener("change", () => {
+                const file = fileInput.files && fileInput.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = () => {
+                    props.image = reader.result; // dataURL
+                    node.properties = props;
+                    workflowSyncGraph(graph);
+                    workflowRenderInspector(node); // 重新渲染，显示预览
+                };
+                reader.readAsDataURL(file);
+            });
+
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "workflow-select-image-button";
+            btn.textContent = "Select Image";
+            btn.addEventListener("click", () => fileInput.click());
+
+            wrap.appendChild(fileInput);
+            wrap.appendChild(btn);
+            inspectorMain.appendChild(wrap);
         }
 
         // Text Output 节点：只显示文本
@@ -608,10 +714,18 @@ function workflowInitLiteGraph() {
         LiteGraph.registerNodeType(type, Node);
     }
 
-    // Input
+    // Text Input（原 workflow/input）
     defineNode("workflow/input", WORKFLOW_NODE_SCHEMAS["workflow/input"], function () {
         const p = this.properties || {};
         this.setOutputData(0, { prompt: p.prompt || "", negative: p.negative_prompt || "", text: p.prompt || "" });
+    });
+
+    // Image Input
+    defineNode("workflow/image_input", WORKFLOW_NODE_SCHEMAS["workflow/image_input"], function () {
+        const p = this.properties || {};
+        this.setOutputData(0, {
+            image: p.image || "",
+        });
     });
 
     // Prompt Optimizer（前端只转发数据，真正优化在后端）
@@ -635,6 +749,33 @@ function workflowInitLiteGraph() {
             width: p.width,
             height: p.height,
             steps: p.steps,
+        });
+    });
+
+    // Img2Img 节点：前端只传递参数，真正生图在后端
+    defineNode("workflow/img2img", WORKFLOW_NODE_SCHEMAS["workflow/img2img"], function () {
+        const textIncoming = this.getInputData(0) || {};   // text_data
+        const imageIncoming = this.getInputData(1) || {};  // image_data
+        const p = this.properties || {};
+
+        // 前端这边只是把两路输入和自身参数打包往后传，
+        // 真正的 img2img 逻辑在后端 workflow/img2img handler 里执行。
+        this.setOutputData(0, {
+            // 文本部分
+            prompt: textIncoming.prompt || "",
+            negative: textIncoming.negative || "",
+            text: textIncoming.text || textIncoming.prompt || "",
+
+            // 图像相关（支持链式 img2img / 直接接到 Image Output）
+            image: imageIncoming.image,
+            images: imageIncoming.images,
+            preview_image: imageIncoming.preview_image,
+
+            // 本节点自己的参数
+            width: p.width,
+            height: p.height,
+            steps: p.steps,
+            denoising_strength: p.denoising_strength,
         });
     });
 
