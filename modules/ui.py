@@ -34,6 +34,8 @@ import modules.ui_prompt_optimizer as ui_prompt_optimizer
 from modules import prompt_optimizer_llm
 import modules.ui_anime_video as ui_anime_video
 import modules.ui_image_retrieval as ui_image_retrieval
+from modules import ui_workflow
+
 
 create_setting_component = ui_settings.create_setting_component
 
@@ -980,6 +982,9 @@ def create_ui():
     with gr.Blocks(analytics_enabled=False) as prompt_optimizer_interface:
         ui_prompt_optimizer.create_ui()
 
+    with gr.Blocks(analytics_enabled=False) as workflow_interface:
+        ui_workflow.create_workflow_ui()
+
     with gr.Blocks(analytics_enabled=False) as extras_interface:
         ui_postprocessing.create_ui()
 
@@ -1230,6 +1235,7 @@ def create_ui():
         (img2img_interface, "img2img", "img2img"),
         (anime_video_interface, "video2anime", "anime_video"),
         (image_retrieval_interface, "Image Search", "image_retrieval"),
+        (workflow_interface, "Workflow", "workflow"),
         (extras_interface, "Extras", "extras"),
         (pnginfo_interface, "PNG Info", "pnginfo"),
         (modelmerger_ui.blocks, "Checkpoint Merger", "modelmerger"),
