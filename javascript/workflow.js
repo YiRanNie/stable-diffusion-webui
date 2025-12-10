@@ -36,8 +36,6 @@ function workflowSyncGraph(graph) {
     textbox.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-// === node outputs 同步 & 去抖 ===
-
 let workflowLastNodeOutputsRaw = null;
 window.workflowNodeOutputs = window.workflowNodeOutputs || {};
 
@@ -47,7 +45,6 @@ function workflowSyncNodeOutputs() {
 
     const raw = textbox.value || "{}";
 
-    // 如果和上次完全一样，说明后端没有新结果，无需重新渲染
     if (raw === workflowLastNodeOutputsRaw) {
         return;
     }
@@ -61,7 +58,6 @@ function workflowSyncNodeOutputs() {
     }
     window.workflowNodeOutputs = parsed;
 
-    // 有非空结果就停表，并固定显示时间
     if (parsed && Object.keys(parsed).length > 0) {
         workflowStopTimer(true);
     }
@@ -105,10 +101,7 @@ function workflowBindNodeOutputsListener(allowRetry = true) {
     sync();
 }
 
-// === 节点 schema 定义 ===
-
 const WORKFLOW_NODE_SCHEMAS = {
-    // 文本输入：类型仍然是 workflow/input，只是标题显示成 Text Input
     "workflow/input": {
         title: "Text Input",
         inputs: [],
@@ -122,7 +115,6 @@ const WORKFLOW_NODE_SCHEMAS = {
             { key: "negative_prompt", label: "Negative Prompt", type: "textarea", placeholder: "Enter negative prompt", rows: 8 },
         ],
     },
-    // 新增：图片输入
     "workflow/image_input": {
         title: "Image Input",
         inputs: [],
@@ -130,14 +122,30 @@ const WORKFLOW_NODE_SCHEMAS = {
         defaults: {
             image: "",
         },
-        fields: [], // inspector 用自定义渲染，不用通用 fields
+        fields: [], 
     },
     "workflow/prompt_optimizer": {
         title: "Prompt Optimizer",
         inputs: ["data"],
         outputs: ["data"],
-        defaults: {},
-        fields: [],
+        defaults: {
+            style: "None",
+        },
+        fields: [
+            {
+                key: "style",
+                label: "Style",
+                type: "select",
+                options: [
+                    "None",
+                    "Photorealistic",
+                    "Anime",
+                    "Illustration",
+                    "Cinematic",
+                    "3D Render",
+                ],
+            },
+        ],
     },
     "workflow/txt2img": {
         title: "Txt2Img",
@@ -156,7 +164,6 @@ const WORKFLOW_NODE_SCHEMAS = {
     },
     "workflow/img2img": {
         title: "Img2Img",
-        // 两个输入端口：一个文本，一个图像
         inputs: ["text_data", "image_data"],
         outputs: ["data"],
         defaults: {
@@ -186,7 +193,6 @@ const WORKFLOW_NODE_SCHEMAS = {
         defaults: {},
         fields: [],
     },
-    // 老的 workflow/output 仍然支持，防止已有图崩掉（palette 不再展示）
     "workflow/output": {
         title: "Output",
         inputs: ["data"],
@@ -196,7 +202,6 @@ const WORKFLOW_NODE_SCHEMAS = {
     },
 };
 
-// === 计时器状态 ===
 
 let workflowTimerId = null;
 let workflowTimerStart = null;
@@ -206,7 +211,6 @@ function workflowStartTimer() {
     const box = window._workflowTimerBox;
     if (!box) return;
 
-    // 以当前隐藏 textbox 的内容作为本轮运行的“基线”
     const outBox = workflowFindComponent("workflow_node_outputs_json", "textarea");
     if (outBox) {
         const raw = outBox.value || "{}";
@@ -215,10 +219,8 @@ function workflowStartTimer() {
         workflowLastNodeOutputsRaw = null;
     }
 
-    // 不清空 window.workflowNodeOutputs，这样上一轮的结果仍然可见
 
-    // 重新启动计时器
-    workflowStopTimer(false); // 关掉上一次 interval，但不写终止时间
+    workflowStopTimer(false);
     workflowTimerStart = performance.now();
     box.textContent = "0.0s";
     box.classList.add("workflow-timer-running");
@@ -248,7 +250,6 @@ function workflowStopTimer(finalize = true) {
     box.classList.remove("workflow-timer-running");
 }
 
-// === palette node ===
 
 function workflowCreatePaletteNode(type) {
     const meta = WORKFLOW_NODE_SCHEMAS[type] || {};
@@ -264,7 +265,6 @@ function workflowCreatePaletteNode(type) {
     return item;
 }
 
-// === 样式注入 ===
 
 function workflowInjectStyle() {
     if (document.getElementById("workflow-style")) return;
@@ -336,14 +336,23 @@ function workflowInjectStyle() {
         color: #9ca3af;
     }
     #workflow_canvas_root .workflow-inspector-field textarea,
-    #workflow_canvas_root .workflow-inspector-field input {
+    #workflow_canvas_root .workflow-inspector-field input,
+    #workflow_canvas_root .workflow-inspector-field select {
         background: #05070d;
         border-radius: 8px;
         border: 1px solid #374151;
         font-size: 12px;
         padding: 6px 8px;
         color: #e5e7eb;
+        appearance: none;
+        -webkit-appearance: none;
+        -moz-appearance: none;
     }
+    #workflow_canvas_root .workflow-inspector-field select option {
+        background: #05070d;
+        color: #e5e7eb;
+    }
+    
     #workflow_canvas_root .workflow-run-container {
         margin-top: 4px;
         display: flex;
@@ -409,7 +418,6 @@ function workflowInjectStyle() {
         cursor: pointer;
     }
 
-    /* 全屏预览遮罩 */
     .workflow-img-overlay {
         position: fixed;
         inset: 0;
@@ -429,7 +437,6 @@ function workflowInjectStyle() {
     document.head.appendChild(style);
 }
 
-// === 初始化 LiteGraph ===
 
 function workflowInitLiteGraph() {
     const root = workflowFindElement("#workflow_canvas_root");
@@ -537,6 +544,22 @@ function workflowInitLiteGraph() {
                 props[field.key] = input.value;
                 workflowSyncGraph(graph);
             });
+        } else if (field.type === "select") {
+            input = document.createElement("select");
+
+            // 创建 option 列表
+            (field.options || []).forEach((opt) => {
+                const optionEl = document.createElement("option");
+                optionEl.value = opt;
+                optionEl.textContent = opt;
+                input.appendChild(optionEl);
+            });
+
+            input.value = current || field.default || "";
+            input.addEventListener("change", () => {
+                props[field.key] = input.value;
+                workflowSyncGraph(graph);
+            });
         } else if (field.type === "number") {
             input = document.createElement("input");
             input.type = "number";
@@ -563,6 +586,7 @@ function workflowInitLiteGraph() {
         return wrap;
     }
 
+
     function workflowRenderInspector(node) {
         if (!inspectorMain) return;
         inspectorMain.innerHTML = "";
@@ -571,7 +595,6 @@ function workflowInitLiteGraph() {
         applyNodeDefaults(node);
         const meta = WORKFLOW_NODE_SCHEMAS[node.type];
 
-        // 通用字段（Text Input / Txt2Img 等）
         if (meta && Array.isArray(meta.fields) && node.type !== "workflow/image_input") {
             meta.fields.forEach((field) => {
                 const el = renderField(node, field);
@@ -579,7 +602,6 @@ function workflowInitLiteGraph() {
             });
         }
 
-        // Image Input：自定义 inspector（选择图片 + 预览）
         if (node.type === "workflow/image_input") {
             const props = node.properties || {};
 
@@ -613,10 +635,10 @@ function workflowInitLiteGraph() {
                 if (!file) return;
                 const reader = new FileReader();
                 reader.onload = () => {
-                    props.image = reader.result; // dataURL
+                    props.image = reader.result;
                     node.properties = props;
                     workflowSyncGraph(graph);
-                    workflowRenderInspector(node); // 重新渲染，显示预览
+                    workflowRenderInspector(node);
                 };
                 reader.readAsDataURL(file);
             });
@@ -632,7 +654,6 @@ function workflowInitLiteGraph() {
             inspectorMain.appendChild(wrap);
         }
 
-        // Text Output 节点：只显示文本
         if (node.type === "workflow/output_text" || node.type === "workflow/output") {
             const allOutputs = window.workflowNodeOutputs || {};
             const nodeOutputs = allOutputs[String(node.id)] || {};
@@ -654,7 +675,6 @@ function workflowInitLiteGraph() {
             inspectorMain.appendChild(wrap);
         }
 
-        // Image Output 节点：只显示图片 + 下载按钮
         if (node.type === "workflow/output_image") {
             const allOutputs = window.workflowNodeOutputs || {};
             const nodeOutputs = allOutputs[String(node.id)] || {};
@@ -714,13 +734,11 @@ function workflowInitLiteGraph() {
         LiteGraph.registerNodeType(type, Node);
     }
 
-    // Text Input（原 workflow/input）
     defineNode("workflow/input", WORKFLOW_NODE_SCHEMAS["workflow/input"], function () {
         const p = this.properties || {};
         this.setOutputData(0, { prompt: p.prompt || "", negative: p.negative_prompt || "", text: p.prompt || "" });
     });
 
-    // Image Input
     defineNode("workflow/image_input", WORKFLOW_NODE_SCHEMAS["workflow/image_input"], function () {
         const p = this.properties || {};
         this.setOutputData(0, {
@@ -728,7 +746,6 @@ function workflowInitLiteGraph() {
         });
     });
 
-    // Prompt Optimizer（前端只转发数据，真正优化在后端）
     defineNode("workflow/prompt_optimizer", WORKFLOW_NODE_SCHEMAS["workflow/prompt_optimizer"], function () {
         const incoming = this.getInputData(0) || {};
         this.setOutputData(0, {
@@ -738,7 +755,6 @@ function workflowInitLiteGraph() {
         });
     });
 
-    // Txt2Img 节点：前端只传递参数，真正生图在后端
     defineNode("workflow/txt2img", WORKFLOW_NODE_SCHEMAS["workflow/txt2img"], function () {
         const incoming = this.getInputData(0) || {};
         const p = this.properties || {};
@@ -752,26 +768,20 @@ function workflowInitLiteGraph() {
         });
     });
 
-    // Img2Img 节点：前端只传递参数，真正生图在后端
     defineNode("workflow/img2img", WORKFLOW_NODE_SCHEMAS["workflow/img2img"], function () {
-        const textIncoming = this.getInputData(0) || {};   // text_data
-        const imageIncoming = this.getInputData(1) || {};  // image_data
+        const textIncoming = this.getInputData(0) || {};
+        const imageIncoming = this.getInputData(1) || {};
         const p = this.properties || {};
 
-        // 前端这边只是把两路输入和自身参数打包往后传，
-        // 真正的 img2img 逻辑在后端 workflow/img2img handler 里执行。
         this.setOutputData(0, {
-            // 文本部分
             prompt: textIncoming.prompt || "",
             negative: textIncoming.negative || "",
             text: textIncoming.text || textIncoming.prompt || "",
 
-            // 图像相关（支持链式 img2img / 直接接到 Image Output）
             image: imageIncoming.image,
             images: imageIncoming.images,
             preview_image: imageIncoming.preview_image,
 
-            // 本节点自己的参数
             width: p.width,
             height: p.height,
             steps: p.steps,
@@ -779,19 +789,16 @@ function workflowInitLiteGraph() {
         });
     });
 
-    // Text Output：只做透传
     defineNode("workflow/output_text", WORKFLOW_NODE_SCHEMAS["workflow/output_text"], function () {
         const incoming = this.getInputData(0) || {};
         this.setOutputData(0, incoming);
     });
 
-    // Image Output：只做透传
     defineNode("workflow/output_image", WORKFLOW_NODE_SCHEMAS["workflow/output_image"], function () {
         const incoming = this.getInputData(0) || {};
         this.setOutputData(0, incoming);
     });
 
-    // 兼容旧的 workflow/output（和 Text Output 类似）
     defineNode("workflow/output", WORKFLOW_NODE_SCHEMAS["workflow/output"], function () {
         const incoming = this.getInputData(0) || {};
         this.setOutputData(0, incoming);
@@ -841,7 +848,6 @@ function workflowInitLiteGraph() {
     workflowBindNodeOutputsListener();
 }
 
-// === 加载 LiteGraph ===
 
 function workflowEnsureLiteGraphLoaded() {
     if (window.LiteGraph) {
@@ -880,7 +886,6 @@ if (window.onUiLoaded) {
     window.addEventListener("load", initWorkflowUI);
 }
 
-// === 全屏预览辅助 ===
 function workflowShowImageLightbox(src) {
     if (!src) return;
 
@@ -894,7 +899,6 @@ function workflowShowImageLightbox(src) {
         img.className = "workflow-img-overlay-img";
         overlay.appendChild(img);
 
-        // 点击任意位置关闭
         overlay.addEventListener("click", () => {
             workflowHideImageLightbox();
         });

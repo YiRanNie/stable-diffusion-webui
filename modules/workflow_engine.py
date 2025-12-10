@@ -59,12 +59,6 @@ class WorkflowContext:
 
 
 def _merge_input_payload(inputs: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    把上游节点通过端口传过来的 data 合并成一个扁平 payload：
-    - 先拿 inputs["data"]（如果是 dict）
-    - 再补充 prompt / negative / text 顶层字段
-    其他字段（例如 images / preview_image / width / height / steps 等）会自然保留下来。
-    """
     payload = inputs.get("data") if isinstance(inputs.get("data"), dict) else {}
     merged: Dict[str, Any] = {}
     if isinstance(payload, dict):
@@ -83,11 +77,7 @@ def register_node_handler(node_type: str):
 
 
 def _debug(msg: str) -> None:
-    """统一的调试输出入口，方便随时关/开。"""
-    try:
-        print(f"[Workflow] {msg}", flush=True)
-    except Exception:
-        pass
+    pass
 
 
 def parse_graph_from_json(graph_json: str) -> WorkflowGraph:
@@ -97,7 +87,6 @@ def parse_graph_from_json(graph_json: str) -> WorkflowGraph:
     nodes_data = data.get("nodes")
     links_data = data.get("links")
     if isinstance(nodes_data, list) and isinstance(links_data, list):
-        # LiteGraph 风格
         port_maps: Dict[str, Dict[str, List[str]]] = {}
         for n in nodes_data:
             node_id = str(n.get("id"))
@@ -128,7 +117,6 @@ def parse_graph_from_json(graph_json: str) -> WorkflowGraph:
             dst_port = dst_ports[dst_index] if 0 <= dst_index < len(dst_ports) else f"in_{dst_index}"
             edges_list.append(WorkflowEdge(src=src_id, src_port=src_port, dst=dst_id, dst_port=dst_port))
     else:
-        # 简单自定义格式
         nodes = data.get("nodes", {})
         edges = data.get("edges", [])
         for node_id, node_data in nodes.items():
@@ -164,7 +152,6 @@ def topological_sort(graph: WorkflowGraph) -> List[str]:
                 if indegree[edge.dst] == 0:
                     queue.append(edge.dst)
     if len(order) != len(graph.nodes):
-        # 有环就退化为任意顺序
         return list(graph.nodes.keys())
     return order
 
@@ -174,28 +161,16 @@ NODE_HANDLERS: Dict[str, Any] = {}
 
 @register_node_handler("workflow/text_input")
 def handle_text_input(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowContext) -> Dict[str, Any]:
-    """
-    纯文本输入节点：原来的 workflow/input，现在改名为 workflow/text_input。
-    """
     prompt = node.config.get("prompt", "")
     negative = node.config.get("negative_prompt", "")
     return {"data": {"prompt": prompt, "negative": negative, "text": prompt}}
 
 
-# 兼容老的 workflow/input 类型（老工程里保存的图还能跑）
 NODE_HANDLERS["workflow/input"] = handle_text_input
-
 
 @register_node_handler("workflow/image_input")
 def handle_image_input(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowContext) -> Dict[str, Any]:
-    """
-    图片输入节点：workflow/image_input
-    目前的设计：
-    - 前端会把选中的图片信息（例如文件路径 / base64 / URL）写进 node.config["image"]
-    - 这里简单地把它透传到 data.image，后续 img2img 节点可以从 payload["image"] 里拿到。
-    后面如果接 Gradio Image 组件并传 PIL.Image 进来，也可以在这里做类型转换。
-    """
-    image_val = node.config.get("image")  # 目前只是预留字段，前端接好后才能真正生效
+    image_val = node.config.get("image")
     data = {}
     if image_val is not None:
         data["image"] = image_val
@@ -215,27 +190,34 @@ def handle_prompt_optimizer(node: WorkflowNode, inputs: Dict[str, Any], ctx: Wor
         f"input_prompt={base_prompt!r} input_negative={negative_prompt!r}"
     )
 
-    styles = node.config.get("style")
-    if styles and hasattr(prompt_optimizer_llm, "DEFAULT_NEGATIVE"):
-        # style 先留着做扩展
-        pass
+    style_name = (node.config.get("style") or "").strip()
 
     if prompt_optimizer_llm is not None:
-        optimize_fn = getattr(prompt_optimizer_llm, "optimize_prompt_llm", None)
+        optimize_plain_fn = getattr(prompt_optimizer_llm, "optimize_prompt_llm", None)
+        optimize_with_style_fn = getattr(prompt_optimizer_llm, "optimize_prompt_with_style", None)
         generate_negative_fn = getattr(prompt_optimizer_llm, "generate_negative_prompt", None)
-        if callable(optimize_fn):
-            try:
-                opt_val = optimize_fn(base_prompt)
-                if isinstance(opt_val, str) and opt_val.strip():
-                    optimized_prompt = opt_val
-            except Exception:
-                optimized_prompt = base_prompt
+
+        try:
+            opt_val = None
+            if style_name and style_name != "None" and callable(optimize_with_style_fn):
+                _debug(f"[PromptOptimizer] node_id={node.id} use style={style_name!r}")
+                opt_val = optimize_with_style_fn(base_prompt, style_name)
+            elif callable(optimize_plain_fn):
+                opt_val = optimize_plain_fn(base_prompt)
+
+            if isinstance(opt_val, str) and opt_val.strip():
+                optimized_prompt = opt_val
+        except Exception as exc:
+            _debug(f"[PromptOptimizer] node_id={node.id} optimize failed: {exc}")
+            optimized_prompt = base_prompt
+
         if callable(generate_negative_fn):
             try:
                 neg_val = generate_negative_fn(base_prompt)
                 if isinstance(neg_val, str) and neg_val.strip():
                     optimized_negative = neg_val
-            except Exception:
+            except Exception as exc:
+                _debug(f"[PromptOptimizer] node_id={node.id} generate_negative failed: {exc}")
                 optimized_negative = negative_prompt
 
     if not optimized_negative:
@@ -257,6 +239,7 @@ def handle_prompt_optimizer(node: WorkflowNode, inputs: Dict[str, Any], ctx: Wor
             "text": optimized_prompt + "\n" + optimized_negative,
         }
     }
+
 
 
 def _safe_int(val: Any, default: int) -> int:
@@ -283,16 +266,10 @@ def _create_txt2img_processing_for_workflow(
     height: int,
     steps: int,
 ):
-    """
-    极简版 txt2img：
-    - 不经过 modules.txt2img / scripts 系统，避免脚本参数数量不匹配
-    - 直接构造 StableDiffusionProcessingTxt2Img，然后 process_images
-    """
     width = max(64, _safe_int(width, 512))
     height = max(64, _safe_int(height, 512))
     steps = max(1, _safe_int(steps, 20))
 
-    # 8 的倍数对齐
     width = width - (width % 8)
     height = height - (height % 8)
 
@@ -317,18 +294,13 @@ def _create_txt2img_processing_for_workflow(
         height=height,
     )
 
-    # 手动设置步数
     p.steps = steps
-    # 区分一下来源
     p.user = "workflow"
 
     return p
 
 
 def _run_txt2img_processing(p):
-    """
-    极简执行：直接 process_images，不走 scripts_txt2img.run
-    """
     with closing(p):
         processed = processing.process_images(p)
 
@@ -336,15 +308,9 @@ def _run_txt2img_processing(p):
     return processed
 
 def _load_image_from_payload(payload: Dict[str, Any]):
-    """
-    从 image_data payload 中解析出一张 PIL.Image：
-    - 支持 image_input 节点传进来的 dataURL/base64（payload["image"]）
-    - 支持 txt2img 节点传进来的本地文件路径（payload["images"] 或 payload["preview_image"]）
-    """
     if not isinstance(payload, dict):
         return None
 
-    # 1) image_input: dataURL / base64
     img_val = payload.get("image")
     if isinstance(img_val, str):
         if img_val.startswith("data:"):
@@ -356,13 +322,11 @@ def _load_image_from_payload(payload: Dict[str, Any]):
             except Exception as exc:
                 _debug(f"[Img2Img] decode dataURL failed: {exc}")
         else:
-            # 当作路径试试
             try:
                 return images.fix_image(images.read(img_val))
             except Exception as exc:
                 _debug(f"[Img2Img] read image path failed: {exc}")
 
-    # 2) 来自 txt2img: images 列表
     paths = payload.get("images")
     if isinstance(paths, list) and paths:
         path = paths[0]
@@ -371,7 +335,6 @@ def _load_image_from_payload(payload: Dict[str, Any]):
         except Exception as exc:
             _debug(f"[Img2Img] read images[0] failed: {exc}")
 
-    # 3) 来自 txt2img: preview_image 里带 file= 前缀
     prev = payload.get("preview_image")
     if isinstance(prev, str) and prev:
         path = prev
@@ -388,12 +351,6 @@ def _load_image_from_payload(payload: Dict[str, Any]):
 
 @register_node_handler("workflow/txt2img")
 def handle_txt2img(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowContext) -> Dict[str, Any]:
-    """
-    文生图节点：
-    - 输入：从上游拿 prompt / negative（可以来自 Text Input 或 Prompt Optimizer）
-    - 节点属性：width / height / steps
-    - 输出：images（路径列表，给后续节点用）、preview_image（字符串 URL，给前端 Output 预览用）、text/info
-    """
     payload = _merge_input_payload(inputs)
     prompt = payload.get("prompt") or node.config.get("prompt", "") or ""
     negative = payload.get("negative") or node.config.get("negative_prompt", "") or ""
@@ -451,16 +408,6 @@ def handle_txt2img(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowCont
 
 @register_node_handler("workflow/img2img")
 def handle_img2img(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowContext) -> Dict[str, Any]:
-    """
-    图生图节点：
-    - 输入端口：
-        text_data: 上游的文本信息（Text Input / Prompt Optimizer / 其他文本节点）
-        image_data: 上游的图像信息（Image Input / Txt2Img / 其他图像节点）
-    - 节点属性：width / height / steps（与 txt2img 节点类似）
-    - 输出：与 txt2img 一致，包含 images / preview_image / prompt / negative / text
-    """
-
-    # 1) 分别取两个输入端口（注意：这里不走 _merge_input_payload）
     text_payload = inputs.get("text_data") or {}
     image_payload = inputs.get("image_data") or {}
 
@@ -470,12 +417,11 @@ def handle_img2img(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowCont
     prompt = text_payload.get("prompt") or node.config.get("prompt", "") or ""
     negative = text_payload.get("negative") or node.config.get("negative_prompt", "") or ""
 
-    # 2) 从 image_data 里解析一张 PIL.Image
+
     init_image = _load_image_from_payload(image_payload)
     if init_image is None:
         return {"data": {"error": "img2img failed: no valid input image"}}
 
-    # 3) width / height / steps：优先节点属性，其次上游 payload，最后回退到图片尺寸 / 默认值
     def pick_int(name: str, default: int) -> int:
         if name in node.config:
             return _safe_int(node.config.get(name), default)
@@ -485,7 +431,6 @@ def handle_img2img(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowCont
             return _safe_int(image_payload.get(name), default)
         return default
 
-    # 如果节点没填分辨率，就用原图尺寸作为默认
     width_default = getattr(init_image, "width", 512) or 512
     height_default = getattr(init_image, "height", 512) or 512
 
@@ -493,7 +438,6 @@ def handle_img2img(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowCont
     height = pick_int("height", height_default)
     steps = pick_int("steps", 20)
 
-    # 基本合法化 & 对齐
     width = max(64, width)
     height = max(64, height)
     steps = max(1, steps)
@@ -502,7 +446,6 @@ def handle_img2img(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowCont
 
     cfg_scale = getattr(opts, "cfg_scale", 7.0)
 
-    # 优先使用节点上的 denoising_strength，其次上游 payload，最后用全局默认
     raw_denoise = None
     if "denoising_strength" in node.config:
         raw_denoise = node.config.get("denoising_strength")
@@ -525,7 +468,6 @@ def handle_img2img(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowCont
         f"steps={steps} denoising={denoising} cfg={cfg_scale}"
     )
 
-    # 4) 构造极简版 StableDiffusionProcessingImg2Img
     try:
         p = processing.StableDiffusionProcessingImg2Img(
             sd_model=shared.sd_model,
@@ -546,7 +488,6 @@ def handle_img2img(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowCont
         p.steps = steps
         p.user = "workflow"
 
-        # 这里直接重用 process_images 包装（与 txt2img 一致）
         processed = _run_txt2img_processing(p)
 
     except Exception as exc:
@@ -583,12 +524,6 @@ def handle_img2img(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowCont
 
 @register_node_handler("workflow/output")
 def handle_output(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowContext) -> Dict[str, Any]:
-    """
-    工作流终点：
-    - 兼容纯文本链路（prompt/negative/text）
-    - 也兼容图片链路（images/preview_image），原样透传，方便前端 Output inspector 判断展示模式。
-    - 如果上游有 error 字段，则直接在文本里显示错误。
-    """
     payload = _merge_input_payload(inputs)
 
     error_msg = payload.get("error")
@@ -623,7 +558,6 @@ def handle_output(node: WorkflowNode, inputs: Dict[str, Any], ctx: WorkflowConte
     }
 
 
-# Text / Image Output 两个变种都用同一个 handler
 NODE_HANDLERS["workflow/output_text"] = handle_output
 NODE_HANDLERS["workflow/output_image"] = handle_output
 
@@ -652,10 +586,6 @@ def execute_workflow(graph: WorkflowGraph) -> WorkflowContext:
 
 
 def build_node_outputs_payload(ctx: WorkflowContext) -> Dict[str, Any]:
-    """
-    将每个节点的输出压缩成只包含基础类型的 summary，
-    用于写回前端的 workflow_node_outputs_json。
-    """
     payload: Dict[str, Any] = {}
     for nid, outputs in ctx.outputs.items():
         summary: Dict[str, Any] = {}
@@ -676,7 +606,6 @@ def run_workflow(graph_json: str):
     _debug(f"Parsed graph nodes={len(graph.nodes)} edges={len(graph.edges)}")
     ctx = execute_workflow(graph)
     _debug(f"Collected outputs for nodes: {list(ctx.outputs.keys())}")
-    # collect terminal output text
     out_text = ""
     for nid, node in graph.nodes.items():
         if node.type in ("workflow/output", "workflow/output_text"):
